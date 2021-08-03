@@ -8,12 +8,12 @@ DWAPlanner::DWAPlanner(void)
     local_nh.param("TARGET_VELOCITY", TARGET_VELOCITY, {0.8});
     local_nh.param("MAX_VELOCITY", MAX_VELOCITY, {1.0});
     local_nh.param("MIN_VELOCITY", MIN_VELOCITY, {0.0});
-    local_nh.param("MAX_YAWRATE", MAX_YAWRATE, {0.8});
+    local_nh.param("MAX_OMEGA", MAX_OMEGA, {0.8});
     local_nh.param("MAX_ACCELERATION", MAX_ACCELERATION, {1.0});
-    local_nh.param("MAX_D_YAWRATE", MAX_D_YAWRATE, {2.0});
+    local_nh.param("MAX_D_OMEGA", MAX_D_OMEGA, {2.0});
     local_nh.param("MAX_DIST", MAX_DIST, {10.0});
     local_nh.param("VELOCITY_RESOLUTION", VELOCITY_RESOLUTION, {0.1});
-    local_nh.param("YAWRATE_RESOLUTION", YAWRATE_RESOLUTION, {0.1});
+    local_nh.param("OMEGA_RESOLUTION", OMEGA_RESOLUTION, {0.1});
     local_nh.param("ANGLE_RESOLUTION", ANGLE_RESOLUTION, {0.2});
     local_nh.param("PREDICT_TIME", PREDICT_TIME, {3.0});
     local_nh.param("TO_GOAL_COST_GAIN", TO_GOAL_COST_GAIN, {1.0});
@@ -22,6 +22,7 @@ DWAPlanner::DWAPlanner(void)
     local_nh.param("USE_SCAN_AS_INPUT", USE_SCAN_AS_INPUT, {false});
     local_nh.param("GOAL_THRESHOLD", GOAL_THRESHOLD, {0.3});
     local_nh.param("TURN_DIRECTION_THRESHOLD", TURN_DIRECTION_THRESHOLD, {1.0});
+    local_nh.param("CAR_L",CAR_L,{0.581});
     DT = 1.0 / HZ;
 
     ROS_INFO("=== DWA Planner ===");
@@ -31,12 +32,12 @@ DWAPlanner::DWAPlanner(void)
     ROS_INFO_STREAM("TARGET_VELOCITY: " << TARGET_VELOCITY);
     ROS_INFO_STREAM("MAX_VELOCITY: " << MAX_VELOCITY);
     ROS_INFO_STREAM("MIN_VELOCITY: " << MIN_VELOCITY);
-    ROS_INFO_STREAM("MAX_YAWRATE: " << MAX_YAWRATE);
+    ROS_INFO_STREAM("MAX_OMEGA: " << MAX_OMEGA);
     ROS_INFO_STREAM("MAX_ACCELERATION: " << MAX_ACCELERATION);
-    ROS_INFO_STREAM("MAX_D_YAWRATE: " << MAX_D_YAWRATE);
+    ROS_INFO_STREAM("MAX_D_OMEGA: " << MAX_D_OMEGA);
     ROS_INFO_STREAM("MAX_DIST: " << MAX_DIST);
     ROS_INFO_STREAM("VELOCITY_RESOLUTION: " << VELOCITY_RESOLUTION);
-    ROS_INFO_STREAM("YAWRATE_RESOLUTION: " << YAWRATE_RESOLUTION);
+    ROS_INFO_STREAM("OMEGA_RESOLUTION: " << OMEGA_RESOLUTION);
     ROS_INFO_STREAM("ANGLE_RESOLUTION: " << ANGLE_RESOLUTION);
     ROS_INFO_STREAM("PREDICT_TIME: " << PREDICT_TIME);
     ROS_INFO_STREAM("TO_GOAL_COST_GAIN: " << TO_GOAL_COST_GAIN);
@@ -44,6 +45,7 @@ DWAPlanner::DWAPlanner(void)
     ROS_INFO_STREAM("OBSTACLE_COST_GAIN: " << OBSTACLE_COST_GAIN);
     ROS_INFO_STREAM("GOAL_THRESHOLD: " << GOAL_THRESHOLD);
     ROS_INFO_STREAM("TURN_DIRECTION_THRESHOLD: " << TURN_DIRECTION_THRESHOLD);
+    ROS_INFO_STREAM("CAR_L: " << CAR_L);
 
     velocity_pub = nh.advertise<geometry_msgs::Twist>("/cmd_vel", 1);
     candidate_trajectories_pub = local_nh.advertise<visualization_msgs::MarkerArray>("candidate_trajectories", 1);
@@ -59,18 +61,18 @@ DWAPlanner::DWAPlanner(void)
     target_velocity_sub = nh.subscribe("/target_velocity", 1, &DWAPlanner::target_velocity_callback, this);
 }
 
-DWAPlanner::State::State(double _x, double _y, double _yaw, double _velocity, double _yawrate)
-    :x(_x), y(_y), yaw(_yaw), velocity(_velocity), yawrate(_yawrate)
+DWAPlanner::State::State(double _x, double _y, double _yaw, double _velocity, double _omega)
+    :x(_x), y(_y), yaw(_yaw), velocity(_velocity), omega(_omega)
 {
 }
 
 DWAPlanner::Window::Window(void)
-    :min_velocity(0.0), max_velocity(0.0), min_yawrate(0.0), max_yawrate(0.0)
+    :min_velocity(0.0), max_velocity(0.0), min_omega(0.0), max_omega(0.0)
 {
 }
 
-DWAPlanner::Window::Window(const double min_v, const double max_v, const double min_y, const double max_y)
-    :min_velocity(min_v), max_velocity(max_v), min_yawrate(min_y), max_yawrate(max_y)
+DWAPlanner::Window::Window(const double min_v, const double max_v, const double min_o, const double max_o)
+    :min_velocity(min_v), max_velocity(max_v), min_omega(min_o), max_omega(max_o)
 {
 }
 
@@ -123,7 +125,7 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(
     std::vector<State> best_traj;
 
     for(float v=dynamic_window.min_velocity; v<=dynamic_window.max_velocity; v+=VELOCITY_RESOLUTION){
-        for(float y=dynamic_window.min_yawrate; y<=dynamic_window.max_yawrate; y+=YAWRATE_RESOLUTION){
+        for(float y=dynamic_window.min_omega; y<=dynamic_window.max_omega; y+=OMEGA_RESOLUTION){
             State state(0.0, 0.0, 0.0, current_velocity.linear.x, current_velocity.angular.z);
             std::vector<State> traj;
             for(float t=0; t<=PREDICT_TIME; t+=DT){
@@ -192,12 +194,12 @@ void DWAPlanner::process(void)
                 std::vector<State> best_traj = dwa_planning(dynamic_window, goal, obs_list);
 
                 cmd_vel.linear.x = best_traj[0].velocity;
-                cmd_vel.angular.z = best_traj[0].yawrate;
+                cmd_vel.angular.z = best_traj[0].omega;
                 visualize_trajectory(best_traj, 1, 0, 0, selected_trajectory_pub);
             }else{
                 cmd_vel.linear.x = 0.0;
                 if(fabs(goal[2])>TURN_DIRECTION_THRESHOLD){
-                    cmd_vel.angular.z = std::min(std::max(goal(2), -MAX_YAWRATE), MAX_YAWRATE);
+                    cmd_vel.angular.z = std::min(std::max(goal(2), -MAX_OMEGA), MAX_OMEGA);
                 }
                 else{
                     cmd_vel.angular.z = 0.0;
@@ -229,11 +231,11 @@ void DWAPlanner::process(void)
 // TODO(lifei) use ackman model,angle_r velocity
 DWAPlanner::Window DWAPlanner::calc_dynamic_window(const geometry_msgs::Twist& current_velocity)
 {
-    Window window(MIN_VELOCITY, MAX_VELOCITY, -MAX_YAWRATE, MAX_YAWRATE);
+    Window window(MIN_VELOCITY, MAX_VELOCITY, -MAX_OMEGA, MAX_OMEGA);
     window.min_velocity = std::max((current_velocity.linear.x - MAX_ACCELERATION*DT), MIN_VELOCITY);
     window.max_velocity = std::min((current_velocity.linear.x + MAX_ACCELERATION*DT), MAX_VELOCITY);
-    window.min_yawrate = std::max((current_velocity.angular.z - MAX_D_YAWRATE*DT), -MAX_YAWRATE);
-    window.max_yawrate = std::min((current_velocity.angular.z + MAX_D_YAWRATE*DT),  MAX_YAWRATE);
+    window.min_omega = std::max((current_velocity.angular.z - MAX_D_OMEGA*DT), -MAX_OMEGA);
+    window.max_omega = std::min((current_velocity.angular.z + MAX_D_OMEGA*DT),  MAX_OMEGA);
     return window;
 }
 
@@ -268,13 +270,13 @@ float DWAPlanner::calc_obstacle_cost(const std::vector<State>& traj, const std::
 }
 
 // TODO(lifei) use ray instead of line
-void DWAPlanner::motion(State& state, const double velocity, const double yawrate)
+void DWAPlanner::motion(State& state, const double velocity, const double omega)
 {
-    state.yaw += yawrate*DT;
+    state.yaw += omega*DT;
     state.x += velocity*std::cos(state.yaw)*DT;
     state.y += velocity*std::sin(state.yaw)*DT;
     state.velocity = velocity;
-    state.yawrate = yawrate;
+    state.omega = omega;
 }
 
 std::vector<std::vector<float>> DWAPlanner::scan_to_obs()

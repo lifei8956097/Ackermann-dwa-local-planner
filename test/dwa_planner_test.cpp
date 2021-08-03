@@ -13,7 +13,7 @@ TEST(TestSuite, test1)
     vel.angular.z = 0.0;
     DWAPlanner::Window window = dwa.calc_dynamic_window(vel);
     EXPECT_LE(window.min_velocity, window.max_velocity);
-    EXPECT_LE(window.min_yawrate, window.max_yawrate);
+    EXPECT_LE(window.min_omega, window.max_omega);
 }
 
 int main(int argc, char** argv)

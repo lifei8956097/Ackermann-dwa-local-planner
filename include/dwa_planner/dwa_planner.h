@@ -29,7 +29,7 @@ public:
         double y;// robot posiiton y
         double yaw;// robot orientation yaw
         double velocity;// robot linear velocity
-        double yawrate;// robot angular velocity
+        double omega;// robot angular velocity
     private:
     };
 
@@ -40,8 +40,8 @@ public:
         Window(const double, const double, const double, const double);
         double min_velocity;
         double max_velocity;
-        double min_yawrate;
-        double max_yawrate;
+        double min_omega;
+        double max_omega;
     private:
     };
     void process(void);
@@ -54,7 +54,7 @@ public:
     float calc_to_goal_cost(const std::vector<State>& traj, const Eigen::Vector3d& goal);
     float calc_speed_cost(const std::vector<State>& traj, const float target_velocity);
     float calc_obstacle_cost(const std::vector<State>& traj, const std::vector<std::vector<float>>&);
-    void motion(State& state, const double velocity, const double yawrate);
+    void motion(State& state, const double velocity, const double omega);
     std::vector<std::vector<float>> raycast();
     std::vector<std::vector<float>> scan_to_obs();
     void visualize_trajectories(const std::vector<std::vector<State>>&, const double, const double, const double, const int, const ros::Publisher&);
@@ -67,12 +67,12 @@ protected:
     double TARGET_VELOCITY;
     double MAX_VELOCITY;
     double MIN_VELOCITY;
-    double MAX_YAWRATE;
+    double MAX_OMEGA;
     double MAX_ACCELERATION;
-    double MAX_D_YAWRATE;
+    double MAX_D_OMEGA;
     double MAX_DIST;
     double VELOCITY_RESOLUTION;
-    double YAWRATE_RESOLUTION;
+    double OMEGA_RESOLUTION;
     double ANGLE_RESOLUTION;
     double PREDICT_TIME;
     double TO_GOAL_COST_GAIN;
@@ -82,7 +82,7 @@ protected:
     bool USE_SCAN_AS_INPUT;
     double GOAL_THRESHOLD;
     double TURN_DIRECTION_THRESHOLD;
-
+    double CAR_L;
     ros::NodeHandle nh;
     ros::NodeHandle local_nh;
 
