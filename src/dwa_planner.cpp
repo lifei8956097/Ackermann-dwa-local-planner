@@ -23,6 +23,8 @@ DWAPlanner::DWAPlanner(void)
   local_nh.param("GOAL_THRESHOLD", GOAL_THRESHOLD, {0.3});
   local_nh.param("TURN_DIRECTION_THRESHOLD", TURN_DIRECTION_THRESHOLD, {1.0});
   local_nh.param("CAR_L", CAR_L, {0.8633246});
+  local_nh.param("CAR_W", CAR_W, {1.036});
+  DETECT_OBSTACLE_DIS_THR = CAR_W * 0.5 + 0.1;
   DT = 1.0 / HZ;
 
   ROS_INFO("=== DWA Planner ===");
@@ -47,7 +49,7 @@ DWAPlanner::DWAPlanner(void)
   ROS_INFO_STREAM("GOAL_THRESHOLD: " << GOAL_THRESHOLD);
   ROS_INFO_STREAM("TURN_DIRECTION_THRESHOLD: " << TURN_DIRECTION_THRESHOLD);
   ROS_INFO_STREAM("CAR_L: " << CAR_L);
-
+  ROS_INFO_STREAM("CAR_W:" << CAR_W);
   akman_cmd_pub = nh.advertise<geometry_msgs::Twist>("/cmd_vel", 1);
   candidate_trajectories_pub = local_nh.advertise<visualization_msgs::MarkerArray>("candidate_trajectories", 1);
   selected_trajectory_pub = local_nh.advertise<visualization_msgs::Marker>("selected_trajectory", 1);
@@ -228,10 +230,10 @@ void DWAPlanner::process(void) {
         ROS_WARN_THROTTLE(1.0, "Local goal has not been updated");
       }
       if (!actuator_updated) {
-        ROS_WARN_THROTTLE(1.0, "Odom has not been updated");
+        ROS_WARN_THROTTLE(1.0, "actuator has not been updated");
       }
       if (!laser_point_cloud_updated) {
-        ROS_WARN_THROTTLE(1.0, "Scan has not been updated");
+        ROS_WARN_THROTTLE(1.0, "Laser point cloud has not been updated");
       }
     }
     ros::spinOnce();
@@ -268,12 +270,22 @@ float DWAPlanner::calc_obstacle_cost(const std::vector<State> &traj, const std::
   float min_dist = 1e3;
   for (const auto &state : traj) {
     for (const auto &obs : obs_list) {
-      float dist = sqrt((state.x - obs[0]) * (state.x - obs[0]) + (state.y - obs[1]) * (state.y - obs[1]));
-      if (dist <= CAR_L * 1.5) {
+      float dist_end = sqrt((state.x - obs[0]) * (state.x - obs[0]) +
+                            (state.y - obs[1]) * (state.y - obs[1]));
+      if (dist_end <= DETECT_OBSTACLE_DIS_THR) {
         cost = 1e6;
         return cost;
       }
-      min_dist = std::min(min_dist, dist);
+      State state_front = state;
+      state_front.x += CAR_L;
+      float dist_front = sqrt((state_front.x - obs[0]) * (state_front.x - obs[0]) +
+                              (state_front.y - obs[1]) * (state_front.y - obs[1]));
+      if (dist_front <= DETECT_OBSTACLE_DIS_THR) {
+        cost = 1e6;
+        return cost;
+      }
+
+      min_dist = std::min(min_dist, std::min(dist_front, dist_end));
     }
   }
   cost = 1.0 / min_dist;

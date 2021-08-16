@@ -85,6 +85,8 @@ class DWAPlanner {
   double GOAL_THRESHOLD;
   double TURN_DIRECTION_THRESHOLD;
   double CAR_L;
+  double CAR_W;
+  double DETECT_OBSTACLE_DIS_THR;
   nav_msgs::Path local_path;
   ros::NodeHandle nh;
   ros::NodeHandle local_nh;

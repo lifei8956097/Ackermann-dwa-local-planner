@@ -5,7 +5,7 @@
     <arg name="robot_param" default="$(find dwa_planner)/config/robot_param.yaml"/>
     <arg name="dwa_param" default="$(find dwa_planner)/config/dwa_param.yaml"/>
 
-    <node pkg="dwa_planner" type="dwa_planner" name="dwa_planner" ns="local_planner">
+    <node pkg="dwa_planner" type="dwa_planner" name="dwa_planner" ns="local_planner" output="screen">
         <rosparam command="load" file="$(arg robot_param)"/>
         <rosparam command="load" file="$(arg dwa_param)"/>
         <param name="HZ" value="$(arg hz)"/>
