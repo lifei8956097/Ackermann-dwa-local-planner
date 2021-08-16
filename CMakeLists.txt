@@ -11,6 +11,9 @@ find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   roscpp
   std_msgs
+  perception_msgs
+  actuator
+  planner
   tf
 )
 

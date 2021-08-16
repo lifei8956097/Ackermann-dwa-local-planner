@@ -8,6 +8,15 @@
   <license>BSD 3-Clause License</license>
 
 
+  <build_depend>perception_msgs</build_depend>
+  <build_export_depend>perception_msgs</build_export_depend>
+  <exec_depend>perception_msgs</exec_depend>
+  <build_depend>actuator</build_depend>
+  <build_export_depend>actuator</build_export_depend>
+  <exec_depend>actuator</exec_depend>
+  <build_depend>planner</build_depend>
+  <build_export_depend>planner</build_export_depend>
+  <exec_depend>planner</exec_depend>
   <buildtool_depend>catkin</buildtool_depend>
   <depend>roscpp</depend>
   <depend>geometry_msgs</depend>
