@@ -26,6 +26,8 @@ DWAPlanner::DWAPlanner(void)
   local_nh.param("CAR_W", CAR_W, {1.036});
   DETECT_OBSTACLE_DIS_THR = CAR_W * 0.5 + 0.1;
   DT = 1.0 / HZ;
+  risk = 0;
+  current_gamma = 0;
 
   ROS_INFO("=== DWA Planner ===");
   ROS_INFO_STREAM("HZ: " << HZ);
@@ -50,7 +52,7 @@ DWAPlanner::DWAPlanner(void)
   ROS_INFO_STREAM("TURN_DIRECTION_THRESHOLD: " << TURN_DIRECTION_THRESHOLD);
   ROS_INFO_STREAM("CAR_L: " << CAR_L);
   ROS_INFO_STREAM("CAR_W:" << CAR_W);
-  akman_cmd_pub = nh.advertise<geometry_msgs::Twist>("/cmd_vel", 1);
+  akman_cmd_pub = nh.advertise<actuator::cmd>("/cmd_vel", 1);
   candidate_trajectories_pub = local_nh.advertise<visualization_msgs::MarkerArray>("candidate_trajectories", 1);
   selected_trajectory_pub = local_nh.advertise<visualization_msgs::Marker>("selected_trajectory", 1);
 
@@ -60,8 +62,8 @@ DWAPlanner::DWAPlanner(void)
   target_velocity_sub = nh.subscribe("/target_velocity", 1, &DWAPlanner::target_velocity_callback, this);
 }
 
-DWAPlanner::State::State(double _x, double _y, double _yaw, double _velocity, double _omega, double _gamma)
-  : x(_x), y(_y), yaw(_yaw), velocity(_velocity), omega(_omega), gamma(_gamma) {
+DWAPlanner::State::State(double _x, double _y, double _yaw, double _velocity, double _omega)
+  : x(_x), y(_y), yaw(_yaw), velocity(_velocity), omega(_omega) {
 }
 
 DWAPlanner::Window::Window(void)
@@ -73,8 +75,8 @@ DWAPlanner::Window::Window(const double min_v, const double max_v, const double 
 }
 
 void DWAPlanner::local_path_callback(const planner::plannerConstPtr &msg) {
+  if (risk != 1 && risk != 2) return;
   local_path.poses.clear();
-
 // 使用半径参数30m进行local goal的获取
   for (unsigned i = msg->startPoint; i < msg->points.size() ; i++) {
     geometry_msgs::Point P0;
@@ -97,15 +99,19 @@ void DWAPlanner::local_path_callback(const planner::plannerConstPtr &msg) {
 }
 
 void DWAPlanner::laser_point_cloud_callback(const perception_msgs::PerceptionConstPtr &msg) {
+  if (risk != 1 && risk != 2) return;
   laser_point_cloud = *msg;
   laser_point_cloud_updated = true;
 }
 //TODO(lifei)
 void DWAPlanner::actuator_callback(const actuator::actuatorConstPtr &msg) {
-  double current_gamma = msg->steer;
-  current_velocity = msg->speed / 3.6; //m/s
-  current_omega = current_velocity * std::tan(current_gamma) / CAR_L;
-  actuator_updated = true;
+  risk = msg->risk;
+  if (risk == 1 || risk == 2) {
+    current_gamma = msg->steer;
+    current_velocity = msg->speed / 3.6; //m/s
+    current_omega = current_velocity * std::tan(current_gamma) / CAR_L;
+    actuator_updated = true;
+  }
 }
 
 void DWAPlanner::target_velocity_callback(const geometry_msgs::TwistConstPtr &msg) {
@@ -127,7 +133,7 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(
 
   for (float v = dynamic_window.min_velocity; v <= dynamic_window.max_velocity; v += VELOCITY_RESOLUTION) {
     for (float omega = dynamic_window.min_omega; omega <= dynamic_window.max_omega; omega += OMEGA_RESOLUTION) {
-      State state(0.0, 0.0, 0.0, current_velocity, current_omega, 0);
+      State state(0.0, 0.0, 0.0, current_velocity, current_omega);
       std::vector<State> traj;
       for (float t = 0; t <= PREDICT_TIME; t += DT) {
         motion(state, v, omega);
@@ -160,7 +166,7 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(
   visualize_trajectories(trajectories, 0, 1, 0, 1000, candidate_trajectories_pub);
   if (min_cost == 1e6) {
     std::vector<State> traj;
-    State state(0.0, 0.0, 0.0, current_velocity, current_omega, 0);
+    State state(0.0, 0.0, 0.0, current_velocity, current_omega);
     traj.push_back(state);
     best_traj = traj;
   }
@@ -202,38 +208,43 @@ void DWAPlanner::process(void) {
       Eigen::Vector3d goal(local_goal.pose.position.x, local_goal.pose.position.y, tf::getYaw(local_goal.pose.orientation));
       ROS_INFO_STREAM("local goal: (" << goal[0] << "," << goal[1] << "," << goal[2] / M_PI * 180 << ")");
 
-      geometry_msgs::Twist cmd_vel;
+      actuator::cmd cmd_vel;
+      cmd_vel.enable = true;
+      cmd_vel.id = 3;
       if (goal.segment(0, 2).norm() > GOAL_THRESHOLD) {
         std::vector<std::vector<float>> obs_list;
         obs_list = laser_point_cloud_to_obs();
         laser_point_cloud_updated = false;
 
         std::vector<State> best_traj = dwa_planning(dynamic_window, goal, obs_list);
-        //TODO(lifei) using omega to generating the gamma
-        cmd_vel.linear.x = best_traj[0].velocity;
-        cmd_vel.angular.z = best_traj[0].omega;
+        cmd_vel.speed = best_traj[0].velocity * 3.6;
+        cmd_vel.steer = std::atan(CAR_L * best_traj[0].omega / best_traj[0].velocity) / M_PI * 180;
         visualize_trajectory(best_traj, 1, 0, 0, selected_trajectory_pub);
       } else {
-        cmd_vel.linear.x = 0.0;
+        cmd_vel.speed = 0.0;
         if (fabs(goal[2]) > TURN_DIRECTION_THRESHOLD) {
-          cmd_vel.angular.z = std::min(std::max(goal(2), -MAX_GAMMA), MAX_GAMMA);
+          cmd_vel.steer = std::min(std::max(goal(2) - current_gamma, MIN_GAMMA), MAX_GAMMA);
         } else {
-          cmd_vel.angular.z = 0.0;
+          cmd_vel.steer = 0.0;
         }
       }
-      ROS_INFO_STREAM("cmd_vel: (" << cmd_vel.linear.x << "[m/s], " << cmd_vel.angular.z << "[rad/s])");
+      ROS_INFO_STREAM("cmd_vel: (" << cmd_vel.speed << "[km/h], " << cmd_vel.steer << "[degree])");
       akman_cmd_pub.publish(cmd_vel);
 
       actuator_updated = false;
     } else {
-      if (!local_goal_subscribed) {
-        ROS_WARN_THROTTLE(1.0, "Local goal has not been updated");
-      }
-      if (!actuator_updated) {
-        ROS_WARN_THROTTLE(1.0, "actuator has not been updated");
-      }
-      if (!laser_point_cloud_updated) {
-        ROS_WARN_THROTTLE(1.0, "Laser point cloud has not been updated");
+      if (risk == 1 || risk == 2) {
+        if (!local_goal_subscribed) {
+          ROS_WARN_THROTTLE(1.0, "Local goal has not been updated");
+        }
+        if (!actuator_updated) {
+          ROS_WARN_THROTTLE(1.0, "actuator has not been updated");
+        }
+        if (!laser_point_cloud_updated) {
+          ROS_WARN_THROTTLE(1.0, "Laser point cloud has not been updated");
+        }
+      } else {
+        ROS_INFO_STREAM("not enable the dwa planner;risk:" << risk);
       }
     }
     ros::spinOnce();
@@ -305,7 +316,7 @@ void DWAPlanner::motion(State &state, const double velocity, const double omega)
   double delta_yaw = omega * DT;
   state.velocity = velocity;
   state.omega = omega;
-  if (fabs(omega) == 0) {
+  if (omega == 0) {
     state.x += velocity * std::cos(state.yaw) * DT;
     state.y += velocity * std::sin(state.yaw) * DT;
     state.yaw += delta_yaw;
@@ -327,7 +338,9 @@ std::vector<std::vector<float>> DWAPlanner::laser_point_cloud_to_obs() {
   return obs_list;
 }
 
-void DWAPlanner::visualize_trajectories(const std::vector<std::vector<State>> &trajectories, const double r, const double g, const double b, const int trajectories_size, const ros::Publisher &pub) {
+void DWAPlanner::visualize_trajectories(const std::vector<std::vector<State>> &trajectories,
+                                        const double r, const double g, const double b,
+                                        const int trajectories_size, const ros::Publisher &pub) {
   visualization_msgs::MarkerArray v_trajectories;
   int count = 0;
   const int size = trajectories.size();
@@ -371,7 +384,9 @@ void DWAPlanner::visualize_trajectories(const std::vector<std::vector<State>> &t
   pub.publish(v_trajectories);
 }
 
-void DWAPlanner::visualize_trajectory(const std::vector<State> &trajectory, const double r, const double g, const double b, const ros::Publisher &pub) {
+void DWAPlanner::visualize_trajectory(const std::vector<State> &trajectory,
+                                      const double r, const double g, const double b,
+                                      const ros::Publisher &pub) {
   visualization_msgs::Marker v_trajectory;
   v_trajectory.header.frame_id = ROBOT_FRAME;
   v_trajectory.header.stamp = ros::Time::now();

@@ -10,13 +10,14 @@
 #include <nav_msgs/Path.h>
 #include <perception_msgs/Perception.h>
 #include <actuator/actuator.h>
+#include <actuator/cmd.h>
 #include <planner/planner.h>
 #include <planner/point.h>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 #include <tf/tf.h>
 #include <tf/transform_listener.h>
-
+#include <atomic>
 #include <Eigen/Dense>
 
 class DWAPlanner {
@@ -25,14 +26,13 @@ class DWAPlanner {
 
   class State {
    public:
-    State(double, double, double, double, double, double);
+    State(double, double, double, double, double);
 
     double x;// robot position x
     double y;// robot posiiton y
     double yaw;// robot orientation yaw
     double velocity;// robot linear velocity
     double omega;// robot angular velocity
-    double gamma;// robot front angle
    private:
   };
 
@@ -56,7 +56,7 @@ class DWAPlanner {
   float calc_speed_cost(const std::vector<State> &traj, const float target_velocity);
   float calc_obstacle_cost(const std::vector<State> &traj, const std::vector<std::vector<float>> &);
   float calculateHeadingCost(const std::vector<State> &traj, const Eigen::Vector3d &goal);
-  void motion(State &state, const double velocity, const double gamma);
+  void motion(State &state, const double velocity, const double omega);
   std::vector<std::vector<float>> laser_point_cloud_to_obs();
   void visualize_trajectories(const std::vector<std::vector<State>> &, const double, const double, const double, const int, const ros::Publisher &);
   void visualize_trajectory(const std::vector<State> &, const double, const double, const double, const ros::Publisher &);
@@ -87,6 +87,7 @@ class DWAPlanner {
   double CAR_L;
   double CAR_W;
   double DETECT_OBSTACLE_DIS_THR;
+  std::atomic<int> risk;
   nav_msgs::Path local_path;
   ros::NodeHandle nh;
   ros::NodeHandle local_nh;
@@ -107,6 +108,7 @@ class DWAPlanner {
   nav_msgs::OccupancyGrid local_map;
   double   current_omega;
   double current_velocity;
+  double current_gamma;
   bool local_goal_subscribed;
   bool laser_point_cloud_updated;
   bool actuator_updated;
