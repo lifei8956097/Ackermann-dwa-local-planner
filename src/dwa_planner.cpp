@@ -52,7 +52,7 @@ DWAPlanner::DWAPlanner(void)
   ROS_INFO_STREAM("TURN_DIRECTION_THRESHOLD: " << TURN_DIRECTION_THRESHOLD);
   ROS_INFO_STREAM("CAR_L: " << CAR_L);
   ROS_INFO_STREAM("CAR_W:" << CAR_W);
-  akman_cmd_pub = nh.advertise<actuator::cmd>("/cmd_vel", 1);
+  akman_cmd_pub = nh.advertise<actuator::cmd>("/takeOver", 1);
   candidate_trajectories_pub = local_nh.advertise<visualization_msgs::MarkerArray>("candidate_trajectories", 1);
   selected_trajectory_pub = local_nh.advertise<visualization_msgs::Marker>("selected_trajectory", 1);
 
