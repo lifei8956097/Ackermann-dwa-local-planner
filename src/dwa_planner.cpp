@@ -2,7 +2,8 @@
 #include <boost/thread.hpp>
 #define DWA_PLANNER_VELOCITY_FACTOR 50
 DWAPlanner::DWAPlanner(void)
-  : local_nh("~"), local_goal_subscribed(false), laser_point_cloud_updated(false), actuator_updated(false) {
+  : local_nh("~"), local_goal_subscribed(false),
+    laser_point_cloud_updated(false), actuator_updated(false), enable_dwa_planner(false) {
   local_nh.param("HZ", HZ, {20});
   local_nh.param("ROBOT_FRAME", ROBOT_FRAME, {"base_link"});
   local_nh.param("TARGET_VELOCITY", TARGET_VELOCITY, {0.8});
@@ -68,12 +69,13 @@ DWAPlanner::DWAPlanner(void)
   local_path_sub = nh.subscribe("/planner", 1, &DWAPlanner::local_path_callback, this);
   laser_point_cloud_sub = nh.subscribe("/perception_info", 1, &DWAPlanner::laser_point_cloud_callback, this);
   actuator_sub = nh.subscribe("/actuator", 1, &DWAPlanner::actuator_callback, this);
-  target_velocity_sub = nh.subscribe("/target_velocity", 1, &DWAPlanner::target_velocity_callback, this);
 //set up the planner's thread
   cmd_thread_ = new boost::thread(boost::bind(&DWAPlanner::cmdThread, this));
 }
 
 DWAPlanner::~DWAPlanner() {
+  enable_dwa_planner = false;
+  cmd_cond_.notify_all();
   cmd_thread_->interrupt();
   cmd_thread_->join();
   delete cmd_thread_;
@@ -92,11 +94,17 @@ DWAPlanner::Window::Window(const double min_v, const double max_v, const double 
 }
 
 DWAPlanner::TrackedArea::TrackedArea(void)
-  : min_x(0.0), max_x(0.0), min_y(0.0), max_y(0.0) {
+  : offset_x(0.0), offset_y(0.0), min_x(0.0), max_x(0.0), min_y(0.0), max_y(0.0) {
 }
 
-DWAPlanner::TrackedArea::TrackedArea(const double min_xx, const double max_xx, const double min_yy, const double max_yy)
-  : min_x(min_xx), max_x(max_xx), min_y(min_yy), max_y(max_yy) {
+DWAPlanner::TrackedArea::TrackedArea(const double off_x, const double off_y,
+                                     const double min_xx, const double max_xx,
+                                     const double min_yy, const double max_yy)
+  : offset_x(off_x), offset_y(off_y), min_x(min_xx), max_x(max_xx), min_y(min_yy), max_y(max_yy) {
+  min_x += offset_x;
+  max_x += offset_x;
+  min_y += offset_y;
+  max_y += offset_y;
 }
 
 bool DWAPlanner::TrackedArea::IsPtInArea(const double x, const double y) {
@@ -105,8 +113,8 @@ bool DWAPlanner::TrackedArea::IsPtInArea(const double x, const double y) {
 }
 
 void DWAPlanner::local_path_callback(const planner::plannerConstPtr &msg) {
-  local_path.poses.clear();
   if (local_goal_id == -1) {
+    local_path.poses.clear();
 // 使用半径参数10m进行local goal的获取
     unsigned int i = msg->startPoint;
     for (; i < msg->points.size() ; i++) {
@@ -124,7 +132,7 @@ void DWAPlanner::local_path_callback(const planner::plannerConstPtr &msg) {
     }
     //TODO(lifei) not calculate the yaw
     if (!local_path.poses.empty()) {
-//      local_path = calculatePathYaw(local_path);
+      local_path = calculatePathYaw(local_path);
       local_goal = local_path.poses.back();
       local_goal_id = msg->points[i - 1].id;
       local_goal_subscribed = true;
@@ -132,10 +140,8 @@ void DWAPlanner::local_path_callback(const planner::plannerConstPtr &msg) {
   } else {
     for (unsigned int i = msg->startPoint; i < msg->points.size() ; i++) {
       if (msg->points[i].id == local_goal_id) {
-        geometry_msgs::PoseStamped pose_tmp;
-        pose_tmp.pose.position.x = msg->points[i].x;
-        pose_tmp.pose.position.y = msg->points[i].y;
-        local_goal = pose_tmp;
+        local_goal.pose.position.x = msg->points[i].x;
+        local_goal.pose.position.y = msg->points[i].y;
         local_goal_subscribed = true;
         break;
       }
@@ -148,22 +154,15 @@ void DWAPlanner::laser_point_cloud_callback(const perception_msgs::PerceptionCon
   laser_point_cloud = *msg;
   laser_point_cloud_updated = true;
 }
-//TODO(lifei)
+
 void DWAPlanner::actuator_callback(const actuator::actuatorConstPtr &msg) {
-  if ( msg->risk == 1) {
-    risk = msg->risk;
-  }
+  risk = msg->risk;
   if (risk == 1) {
     current_gamma_arc = msg->steer / 180 * M_PI;
     current_velocity = msg->speed / 3.6; //m/s
     current_omega = current_velocity * std::tan(current_gamma_arc ) / CAR_L;
     actuator_updated = true;
   }
-}
-
-void DWAPlanner::target_velocity_callback(const geometry_msgs::TwistConstPtr &msg) {
-  TARGET_VELOCITY = msg->linear.x;
-  ROS_INFO_STREAM("target velocity was updated to " << TARGET_VELOCITY << "[m/s]");
 }
 
 std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(
@@ -177,14 +176,22 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(
   float min_head_cost = min_cost;
   std::vector<std::vector<State>> trajectories;
   std::vector<State> best_traj;
-
-
+  // TODO(lifei) 角速度空间添加特定的采样角。
+  std::set<float> omega_space;
+  for (float i = -5; i < 5; i += 2.5) {
+    double arc = i * 0.02;
+    if (arc > dynamic_window.min_omega && arc < dynamic_window.max_omega)
+      omega_space.insert(arc);
+  }
+  for (float omega = dynamic_window.min_omega; omega <= dynamic_window.max_omega; omega += OMEGA_RESOLUTION) {
+    omega_space.insert(omega);
+  }
   for (float v = dynamic_window.min_velocity; v <= dynamic_window.max_velocity; v += VELOCITY_RESOLUTION) {
-    for (float omega = dynamic_window.min_omega; omega <= dynamic_window.max_omega; omega += OMEGA_RESOLUTION) {
+    for (std::set<float>::iterator omega_it = omega_space.begin(); omega_it != omega_space.end(); ++omega_it) {
       State state(0.0, 0.0, 0.0, current_velocity, current_omega);
       std::vector<State> traj;
       for (float t = 0; t <= PREDICT_TIME; t += DT) {
-        motion(state, v, omega);
+        motion(state, v, *omega_it);
         // TODO(lifei) 选择角度在30内，距离在MAX_DIST内的路径，
         if (state.x != 0 && state.y != 0) {
           if ((fabs(std::atan2(state.y, state.x)) > 0.52) ||
@@ -196,15 +203,15 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(
 
       float to_goal_cost = calc_to_goal_cost(traj, goal);
       float speed_cost = calc_speed_cost(traj, current_velocity);
-//      float heading_cost = calculateHeadingCost(traj, goal);
+      float heading_cost = calculateHeadingCost(traj, goal);
       float obstacle_cost = calc_obstacle_cost(traj, obs_list);
       float final_cost = TO_GOAL_COST_GAIN * to_goal_cost + SPEED_COST_GAIN * speed_cost +
-                         OBSTACLE_COST_GAIN * obstacle_cost /*+ HEAD_COST_GAIN * heading_cost*/;
+                         OBSTACLE_COST_GAIN * obstacle_cost + HEAD_COST_GAIN * heading_cost;
       if (min_cost >= final_cost) {
         min_goal_cost = TO_GOAL_COST_GAIN * to_goal_cost;
         min_obs_cost = OBSTACLE_COST_GAIN * obstacle_cost;
         min_speed_cost = SPEED_COST_GAIN * speed_cost;
-//        min_head_cost = HEAD_COST_GAIN * heading_cost;
+        min_head_cost = HEAD_COST_GAIN * heading_cost;
         min_cost = final_cost;
         best_traj = traj;
       }
@@ -214,7 +221,7 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(
   ROS_INFO_STREAM("- Goal cost: " << min_goal_cost);
   ROS_INFO_STREAM("- Obs cost: " << min_obs_cost);
   ROS_INFO_STREAM("- Speed cost: " << min_speed_cost);
-//  ROS_INFO_STREAM("- Head cost: " << min_head_cost);
+  ROS_INFO_STREAM("- Head cost: " << min_head_cost);
   ROS_INFO_STREAM("num of trajectories: " << trajectories.size());
   candidate_trajectories = trajectories;
 //  visualize_trajectories(trajectories, 0, 1, 0, 1000, candidate_trajectories_pub);
@@ -226,6 +233,7 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(
   }
   return best_traj;
 }
+
 // yaw is arc
 nav_msgs::Path DWAPlanner::calculatePathYaw(nav_msgs::Path path_in) {
   int length = path_in.poses.size();
@@ -234,8 +242,8 @@ nav_msgs::Path DWAPlanner::calculatePathYaw(nav_msgs::Path path_in) {
       path_in.poses[0].pose.orientation = tf::createQuaternionMsgFromYaw(0.0);
     return path_in;
   }
-  //TODO(lifei) only calculate the last one yaw
-  for (int i = 0; i < length - 1; ++i) {
+
+  for (int i = length - 2; i < length - 1; ++i) {
     double dx = path_in.poses[i + 1].pose.position.x - path_in.poses[i].pose.position.x;
     double dy = path_in.poses[i + 1].pose.position.y - path_in.poses[i].pose.position.y;
     double theta = atan2(dy, dx);
@@ -247,6 +255,30 @@ nav_msgs::Path DWAPlanner::calculatePathYaw(nav_msgs::Path path_in) {
   return path_in;
 }
 
+bool DWAPlanner::is_enable_planner() {
+  if (!actuator_updated || laser_point_cloud_updated || risk != 1 ) return false;
+  // Collision Detection
+  std::vector<std::vector<float>> obs_list;
+  obs_list = laser_point_cloud_to_obs();
+  if (!collision_detection(local_path, obs_list)) return false;
+  return true;
+}
+
+bool DWAPlanner:: collision_detection(const nav_msgs::Path &_local_path, const std::vector<std::vector<float> > &_obs_list) {
+  if (_local_path.poses.empty() || _obs_list.empty()) return false;
+  for (const auto &iter : _local_path.poses) {
+    TrackedArea path_tracked_area(iter.pose.position.x, iter.pose.position.y,
+                                  tracked_area.min_x, tracked_area.max_x,
+                                  tracked_area.min_y, tracked_area.max_y) ;
+    for (const auto &obs : _obs_list) {
+      if (path_tracked_area.IsPtInArea(obs[0], obs[1])) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 void DWAPlanner::process(void) {
   ros::Rate loop_rate(HZ);
   while (ros::ok()) {
@@ -255,6 +287,13 @@ void DWAPlanner::process(void) {
     bool input_updated = false;
     if (laser_point_cloud_updated) {
       input_updated = true;
+    }
+    if (!enable_dwa_planner) {
+      enable_dwa_planner = is_enable_planner();
+      ros::spinOnce();
+      loop_rate.sleep();
+      ROS_INFO_STREAM_THROTTLE(1.0, "Not enable Planner");
+      continue;
     }
     if (input_updated && local_goal_subscribed && actuator_updated) {
       Window dynamic_window = calc_dynamic_window(current_velocity);
@@ -283,6 +322,7 @@ void DWAPlanner::process(void) {
           cmd_vel.id = control_id;
           local_goal_id = -1;
           risk = 0;
+          enable_dwa_planner = false;
         }
       }
       ROS_INFO_STREAM_THROTTLE(5, "cmd_vel: (" << cmd_vel.speed / DWA_PLANNER_VELOCITY_FACTOR << "[m/s], " << cmd_vel.steer << "[degree])");
@@ -306,6 +346,8 @@ void DWAPlanner::process(void) {
         ROS_INFO_STREAM("not enable the dwa planner;risk:" << risk);
       }
     }
+    // TODO(lifei) enable cmd thread
+    cmd_cond_.notify_one();
     ros::spinOnce();
     loop_rate.sleep();
     ROS_INFO_STREAM_THROTTLE(1.0, "loop time: " << ros::Time::now().toSec() - start << "[s]");
@@ -430,6 +472,11 @@ void DWAPlanner::cmdThread() {
   temp_cmd.speed = 0;
   temp_cmd.steer = 0;
   while (n.ok()) {
+    boost::unique_lock<boost::recursive_mutex> lock(wake_up_mutex_);
+    while (!enable_dwa_planner) {
+      cmd_cond_.wait(lock);
+    }
+    //TODO(lifei) condition cmd_cond_
     if (cmd_updated) {
       boost::unique_lock<boost::recursive_mutex> lock(cmd_mutex_);
       temp_cmd = cmd_vel;
@@ -532,8 +579,8 @@ void DWAPlanner::visualize_local_goal(const geometry_msgs::PoseStamped local_goa
   v_local_goal.type = visualization_msgs::Marker::POINTS;
   v_local_goal.action = visualization_msgs::Marker::ADD;
   v_local_goal.lifetime = ros::Duration();
-  v_local_goal.scale.x = 0.3;
-  v_local_goal.scale.y = 0.3;
+  v_local_goal.scale.x = 0.5;
+  v_local_goal.scale.y = 0.5;
   geometry_msgs::Pose pose;
   pose.orientation.w = 1;
   v_local_goal.pose = pose;

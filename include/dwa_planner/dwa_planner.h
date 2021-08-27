@@ -50,12 +50,14 @@ class DWAPlanner {
   class TrackedArea {
    public:
     TrackedArea(void);
-    TrackedArea(const double, const double, const double, const double);
+    TrackedArea(const double, const double, const double, const double, const double, const double);
     bool IsPtInArea(const double, const double);
     double min_x;
     double max_x;
     double min_y;
     double max_y;
+    double offset_x;
+    double offset_y;
    private:
   };
 
@@ -64,7 +66,6 @@ class DWAPlanner {
   void local_path_callback(const planner::plannerConstPtr &);
   void laser_point_cloud_callback(const perception_msgs::PerceptionConstPtr &);
   void actuator_callback(const actuator::actuatorConstPtr &);
-  void target_velocity_callback(const geometry_msgs::TwistConstPtr &);
   Window calc_dynamic_window(const double);
   float calc_to_goal_cost(const std::vector<State> &traj, const Eigen::Vector3d &goal);
   float calc_speed_cost(const std::vector<State> &traj, const float target_velocity);
@@ -77,6 +78,8 @@ class DWAPlanner {
   void visualize_local_goal(const geometry_msgs::PoseStamped local_goal, const double, const double, const double, const ros::Publisher &);
   std::vector<State> dwa_planning(Window, Eigen::Vector3d, std::vector<std::vector<float>>);
   nav_msgs::Path calculatePathYaw(nav_msgs::Path path_in);
+  bool is_enable_planner();
+  bool collision_detection(const nav_msgs::Path &, const std::vector<std::vector<float>> &);
  protected:
   double HZ;
   std::string ROBOT_FRAME;
@@ -138,6 +141,8 @@ class DWAPlanner {
   bool actuator_updated;
   boost::thread *cmd_thread_;
   boost::recursive_mutex cmd_mutex_;
+  boost::recursive_mutex wake_up_mutex_;
+  boost::condition_variable_any cmd_cond_;
 };
 
 #endif //__DWA_PLANNER_H
