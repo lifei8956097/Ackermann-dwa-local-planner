@@ -71,15 +71,20 @@ class DWAPlanner {
   float calc_speed_cost(const std::vector<State> &traj, const float target_velocity);
   float calc_obstacle_cost(const std::vector<State> &traj, const std::vector<std::vector<float>> &);
   float calculateHeadingCost(const std::vector<State> &traj, const Eigen::Vector3d &goal);
+  float calculatecurvatureCost(const double, const double);
   void motion(State &state, const double velocity, const double omega);
   std::vector<std::vector<float>> laser_point_cloud_to_obs();
+  // 当前的points精度为0.1m无法在过滤,该函数过滤车后的障碍物。
+  std::set<std::vector<float> > laser_point_cloud_to_obs_with_filter();
   void visualize_trajectories(const std::vector<std::vector<State>> &, const double, const double, const double, const int, const ros::Publisher &);
   void visualize_trajectory(const std::vector<State> &, const double, const double, const double, const ros::Publisher &);
   void visualize_local_goal(const geometry_msgs::PoseStamped local_goal, const double, const double, const double, const ros::Publisher &);
+  void visualize_car_mode(const TrackedArea &car_tracked_area, const double, const double, const double, const ros::Publisher &);
+  void visualize_collision_points_warning(const std::set<std::vector<float>> &, const double, const double, const double, const ros::Publisher &);
   std::vector<State> dwa_planning(Window, Eigen::Vector3d, std::vector<std::vector<float>>);
   nav_msgs::Path calculatePathYaw(nav_msgs::Path path_in);
   bool is_enable_planner();
-  bool collision_detection(const nav_msgs::Path &, const std::vector<std::vector<float>> &);
+  bool collision_detection(const nav_msgs::Path &, const std::set<std::vector<float>> &);
  protected:
   double HZ;
   std::string ROBOT_FRAME;
@@ -99,11 +104,13 @@ class DWAPlanner {
   double SPEED_COST_GAIN;
   double OBSTACLE_COST_GAIN;
   double HEAD_COST_GAIN;
+  double CURVATURE_COST_GAIN;
   double DT;
   double GOAL_THRESHOLD;
   double TURN_DIRECTION_THRESHOLD;
   double CAR_L;
   double CAR_W;
+  double LIDAR_2_AKMAN_OFFSET_X;//lidar coord 2 akman coord
   double CAR_FRONT_TRACK_DIS;
   double DETECT_OBSTACLE_DIS_THR;
   std::atomic<int> risk;
@@ -114,9 +121,13 @@ class DWAPlanner {
   ros::NodeHandle local_nh;
 
   ros::Publisher akman_cmd_pub;
+  ros::Publisher local_path_pub;
   ros::Publisher candidate_trajectories_pub;
   ros::Publisher selected_trajectory_pub;
   ros::Publisher local_goal_pub;
+  ros::Publisher car_traked_area_pub;
+  ros::Publisher car_traked_area_warning_pub;
+  ros::Publisher collision_points_warning_pub;
   ros::Subscriber local_path_sub;
   ros::Subscriber local_map_sub;
   ros::Subscriber laser_point_cloud_sub;
@@ -134,6 +145,7 @@ class DWAPlanner {
   double   current_omega;// arc/s
   double current_velocity;//m/s
   double current_gamma_arc; //arc
+  double min_turn_radius;
   TrackedArea tracked_area;
   int  control_id = 1;
   bool local_goal_subscribed;
