@@ -19,6 +19,8 @@
 #include <tf/transform_listener.h>
 #include <atomic>
 #include <Eigen/Dense>
+#include <Eigen/Core>
+#include <Eigen/Geometry>
 
 class DWAPlanner {
  public:
@@ -47,17 +49,35 @@ class DWAPlanner {
    private:
   };
 
+  /*
+   * p1--------------p2
+   * |  *         *  |
+   * |    *     *    |
+   * |       p       |
+   * |     *    *    |
+   * |  *          * |
+   * p3--------------p4
+   */
   class TrackedArea {
    public:
     TrackedArea(void);
-    TrackedArea(const double, const double, const double, const double, const double, const double);
+    TrackedArea(const double, const double, const double, const double, const double, const double, const double);
     bool IsPtInArea(const double, const double);
-    double min_x;
-    double max_x;
-    double min_y;
-    double max_y;
+    // 计算 |p1 p2| X |p1 p|
+    inline double GetCross(const Eigen::Vector3d p1,
+                           const Eigen::Vector3d p2,
+                           const Eigen::Vector3d p) {
+      return (p2[0] - p1[0]) * (p[1] - p1[1]) - (p[0] - p1[0]) * (p2[1] - p1[1]);
+    }
+    double min_x, max_x;
+    double min_y, max_y;
+    Eigen::Vector3d left_top; //p1
+    Eigen::Vector3d right_top; // p2
+    Eigen::Vector3d right_bottom; //p3
+    Eigen::Vector3d left_bottom; //p4
     double offset_x;
     double offset_y;
+    double yaw;
    private:
   };
 
@@ -113,6 +133,7 @@ class DWAPlanner {
   double LIDAR_2_AKMAN_OFFSET_X;//lidar coord 2 akman coord
   double CAR_FRONT_TRACK_DIS;
   double DETECT_OBSTACLE_DIS_THR;
+  double CAR_TRACKED_CIRCUMSCRIBED_RADIUS;//外切半径
   std::atomic<int> risk;
   std::atomic<bool> cmd_updated;
   std::atomic<bool> enable_dwa_planner;
@@ -134,7 +155,7 @@ class DWAPlanner {
   ros::Subscriber local_goal_sub;
   ros::Subscriber actuator_sub;
   ros::Subscriber target_velocity_sub;
-//  tf::TransformListener listener;
+  //  tf::TransformListener listener;
 
   std::vector<std::vector<State>> candidate_trajectories;
   geometry_msgs::PoseStamped local_goal;
