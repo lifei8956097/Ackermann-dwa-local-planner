@@ -23,6 +23,7 @@
 #include <Eigen/Geometry>
 #include <pcl/point_cloud.h>
 #include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/filters/voxel_grid.h>
 
 class DWAPlanner {
  public:
@@ -112,7 +113,8 @@ class DWAPlanner {
   ***设置local goal和id , path sample is 0.2m, offset = 0.5m,offset_index = 0.5 / 0.2;
   */
   void set_local_goal(const int collision_state_index, const double obs_x, const double obs_y, const int offset_index);
-  void update_local_goal();
+  // obstacle_cost using it to filter the far obsracles
+  bool get_obs_neighbours(const pcl::PointXYZ searchPoint, double radius, std::vector<pcl::PointXYZ> *outer_ptr);
  protected:
   double HZ;
   std::string ROBOT_FRAME;
@@ -167,12 +169,13 @@ class DWAPlanner {
   //  tf::TransformListener listener;
 
   std::vector<std::vector<State>> candidate_trajectories;
+  std::vector<geometry_msgs::PoseStamped> local_guider_goals;
   geometry_msgs::PoseStamped local_goal;
   actuator::cmd cmd_vel;
   int local_goal_id = -1;
   nav_msgs::Path local_path;
   planner::planner origin_local_path;// just for update goal position
-  perception_msgs::Perception laser_point_cloud;
+  perception_msgs::Perception laser_point_cloud;// orderd
   nav_msgs::OccupancyGrid local_map;
   double   current_omega;// arc/s
   double current_velocity;//m/s
@@ -188,6 +191,11 @@ class DWAPlanner {
   boost::recursive_mutex cmd_mutex_;
   boost::recursive_mutex wake_up_mutex_;
   boost::condition_variable_any cmd_cond_;
+  pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_orderd_cloud_ptr;
+  pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_orderd_cloud_filter_ptr; // 0.5m lvbo
+  pcl::KdTreeFLANN<pcl::PointXYZ>kdtree;
+  pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+
 };
 
 #endif //__DWA_PLANNER_H

@@ -2,7 +2,7 @@
 #include <boost/thread.hpp>
 #define DWA_PLANNER_VELOCITY_FACTOR 50
 DWAPlanner::DWAPlanner(void)
-  : local_nh("~"), local_goal_exist(false), local_path_updated(false),
+  : local_nh("~"), local_goal_exist(false), pcl_orderd_cloud_ptr(nullptr), local_path_updated(false),
     laser_point_cloud_updated(false), actuator_updated(false), enable_dwa_planner(false) {
   local_nh.param("HZ", HZ, {20});
   local_nh.param("ROBOT_FRAME", ROBOT_FRAME, {"base_link"});
@@ -44,7 +44,10 @@ DWAPlanner::DWAPlanner(void)
                              -(CAR_WIDTH * 0.5 + EXPANSION_DISTANCE_WIDTH),
                              CAR_WIDTH * 0.5 + EXPANSION_DISTANCE_WIDTH);
   local_path.header.frame_id = "base_link";
-
+  pcl::PointCloud<pcl::PointXYZ>::Ptr p(new pcl::PointCloud<pcl::PointXYZ>);
+  pcl::PointCloud<pcl::PointXYZ>::Ptr p_filter(new pcl::PointCloud<pcl::PointXYZ>);
+  pcl_orderd_cloud_filter_ptr = p_filter;
+  pcl_orderd_cloud_ptr = p;
 
   ROS_INFO("=== DWA Planner ===");
   ROS_INFO_STREAM("HZ: " << HZ);
@@ -96,6 +99,10 @@ DWAPlanner::~DWAPlanner() {
   cmd_thread_->interrupt();
   cmd_thread_->join();
   delete cmd_thread_;
+
+//  if (pcl_orderd_cloud_ptr != nullptr) {
+//    delete pcl_orderd_cloud_ptr;
+//  }
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -181,6 +188,24 @@ void DWAPlanner::local_path_callback(const planner::plannerConstPtr &msg) {
 
 void DWAPlanner::laser_point_cloud_callback(const perception_msgs::PerceptionConstPtr &msg) {
   laser_point_cloud = *msg;
+  // sort
+  std::sort(laser_point_cloud.info.begin(), laser_point_cloud.info.end(),
+  [](const perception_msgs::Info a, const perception_msgs::Info b) {
+    return std::atan2(a.y, a.x) < std::atan2(b.y, b.x);
+  });
+  pcl_orderd_cloud_ptr->points.clear();
+  for (auto it : laser_point_cloud.info) {
+    pcl::PointXYZ point;
+    point.x = it.x;
+    point.y = it.y;
+    pcl_orderd_cloud_ptr->points.push_back(point);
+  }
+  // TODO(lifei) filter the point cloud, if needed
+  voxel_filter.setInputCloud(pcl_orderd_cloud_ptr);
+  voxel_filter.setLeafSize(0.5f, 0.5f, 0.5f);
+  voxel_filter.filter(*pcl_orderd_cloud_filter_ptr);
+  // kdtree
+  kdtree.setInputCloud(pcl_orderd_cloud_ptr);
   laser_point_cloud_updated = true;
 }
 
@@ -211,7 +236,7 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(Window dynamic_window, E
   double arc_step = 0.01;
   for (float i = -0.04; i <= 0.04; i += arc_step) {
     if (i >= dynamic_window.min_omega && i <= dynamic_window.max_omega);
-      omega_space.insert(i);
+    omega_space.insert(i);
   }
   arc_step = 0.04;
 //  for (float i = -0.4; i <= 0.4; i += arc_step) {
@@ -224,9 +249,9 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(Window dynamic_window, E
   }
   for (float v = dynamic_window.min_velocity; v <= dynamic_window.max_velocity; v += VELOCITY_RESOLUTION) {
     for (std::set<float>::iterator omega_it = omega_space.begin(); omega_it != omega_space.end(); ++omega_it) {
-       double yaw_filter = 1.05;
-      if( v == 1) yaw_filter = 1.57;
-     
+      double yaw_filter = 1.05;
+      if ( v == 1) yaw_filter = 1.57;
+
       State state(0.0, 0.0, 0.0, current_velocity, current_omega);
       std::vector<State> traj;
       for (float t = 0; t <= PREDICT_TIME; t += DT) {
@@ -253,7 +278,7 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(Window dynamic_window, E
         }
       }
       // abandon the too short trajectory
-      if ( (fabs(*omega_it) <= 0.04 && traj.back().x < CAR_FRONT_2_AKMAN_LENGTH + 0.8 + 0.2) || 
+      if ( (fabs(*omega_it) <= 0.04 && traj.back().x < CAR_FRONT_2_AKMAN_LENGTH + 0.8 + 0.2) ||
            traj.back().x < 0.2) continue;
       trajectories.push_back(traj);
 
@@ -379,6 +404,24 @@ void DWAPlanner::set_local_goal(const int collision_state_index, const double ob
   }
 }
 
+bool DWAPlanner::get_obs_neighbours(const pcl::PointXYZ searchPoint, double radius,
+                                    std::vector<pcl::PointXYZ> *outer_ptr) {
+  //TODO(lifei) using kdtree search neighbours of collision obs
+  std::vector<int> pointIdxRadiusSearch;
+  std::vector<float> pointRadiusSquaredDistance;
+  if ( kdtree.radiusSearch (searchPoint, radius, pointIdxRadiusSearch, pointRadiusSquaredDistance) > 0 ) {
+    std::sort(pointIdxRadiusSearch.begin(), pointIdxRadiusSearch.end());
+    for (size_t i = 0; i < pointIdxRadiusSearch.size (); ++i) {
+      pcl::PointXYZ out_point;
+      out_point.x = pcl_orderd_cloud_ptr->points[ pointIdxRadiusSearch[i]].x;
+      out_point.y = pcl_orderd_cloud_ptr->points[pointIdxRadiusSearch[i]].y;
+      outer_ptr->push_back(out_point);
+    }
+    return true;
+  }
+  return false;
+}
+
 void DWAPlanner::process(void) {
   ros::Rate loop_rate(HZ);
   while (ros::ok()) {
@@ -414,10 +457,10 @@ void DWAPlanner::process(void) {
         obs_list = laser_point_cloud_to_obs();
         std::vector<State> best_traj = dwa_planning(dynamic_window, goal, obs_list);
         cmd_vel.speed = best_traj[0].velocity * DWA_PLANNER_VELOCITY_FACTOR;
-        cmd_vel.steer = std::min(30.0,std::max(-30.0,std::atan(WHELL_AXLE_LENGTH * best_traj[0].omega /
-                                  (best_traj[0].velocity + 0.001)) / M_PI * 180));
-        
-        ROS_INFO_STREAM( "best_: (" << best_traj[0].omega << "[arc/s], " << std::atan(WHELL_AXLE_LENGTH * best_traj[0].omega /(best_traj[0].velocity + 0.001)) / M_PI * 180 << "[degree])");
+        cmd_vel.steer = std::min(30.0, std::max(-30.0, std::atan(WHELL_AXLE_LENGTH * best_traj[0].omega /
+                                                                 (best_traj[0].velocity + 0.001)) / M_PI * 180));
+
+        ROS_INFO_STREAM( "best_: (" << best_traj[0].omega << "[arc/s], " << std::atan(WHELL_AXLE_LENGTH * best_traj[0].omega / (best_traj[0].velocity + 0.001)) / M_PI * 180 << "[degree])");
         ROS_INFO_STREAM( "cmd_vel: (" << cmd_vel.speed / DWA_PLANNER_VELOCITY_FACTOR << "[m/s], " << cmd_vel.steer << "[degree])");
         visualize_trajectory(best_traj, 1, 0, 0, selected_trajectory_pub);
       } else {
@@ -574,9 +617,9 @@ std::vector<std::vector<float>> DWAPlanner::laser_point_cloud_to_obs() {
   std::set<std::vector<float>> obs_list;
   std::vector<std::vector<float>> ret_obs_list;
   for (auto it : laser_point_cloud.info) {
-   if (it.x + LIDAR_2_AKMAN_OFFSET_X > 3 * MIN_TRUN_RADIUS ||
-      it.x + LIDAR_2_AKMAN_OFFSET_X < -(CAR_BACK_2_AKMAN_LENGTH + EXPANSION_DISTANCE_LENGTH) ||
-      fabs(it.y) > 3 *CAR_WIDTH) continue;
+    if (it.x + LIDAR_2_AKMAN_OFFSET_X > 3 * MIN_TRUN_RADIUS ||
+        it.x + LIDAR_2_AKMAN_OFFSET_X < -(CAR_BACK_2_AKMAN_LENGTH + EXPANSION_DISTANCE_LENGTH) ||
+        fabs(it.y) > 3 * CAR_WIDTH) continue;
     std::vector<float> obs_state = {(float)(it.x + LIDAR_2_AKMAN_OFFSET_X), float(it.y)};
     obs_list.insert(obs_state);
   }
