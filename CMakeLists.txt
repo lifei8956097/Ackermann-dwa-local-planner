@@ -16,7 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
   planner
   tf
 )
-
+find_package(PCL REQUIRED)
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
 find_package(Eigen3 REQUIRED COMPONENTS system)
@@ -123,9 +123,10 @@ catkin_package(
 include_directories(
   include
   ${catkin_INCLUDE_DIRS}
+  ${PCL_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIRS}
 )
-
+link_directories(${PCL_LIBRARY_DIRS})
 ## Declare a C++ library
 # add_library(${PROJECT_NAME}
 #   src/${PROJECT_NAME}/dwa_planner.cpp
@@ -162,6 +163,7 @@ add_executable(dwa_planner src/dwa_planner_node.cpp)
 # )
 target_link_libraries(dwa_planner
   ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
   dwa_planner_lib
 )
 

@@ -21,6 +21,8 @@
 #include <Eigen/Dense>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
+#include <pcl/point_cloud.h>
+#include <pcl/kdtree/kdtree_flann.h>
 
 class DWAPlanner {
  public:
@@ -104,7 +106,13 @@ class DWAPlanner {
   std::vector<State> dwa_planning(Window, Eigen::Vector3d, std::vector<std::vector<float>>);
   nav_msgs::Path calculatePathYaw(nav_msgs::Path path_in);
   bool is_enable_planner();
-  bool collision_detection(const nav_msgs::Path &, const std::set<std::vector<float>> &);
+  // 8m以外不检测，检测到碰撞后，在碰撞点后5m设置local goal
+  bool collision_detection(const planner::planner &, const std::set<std::vector<float>> &);
+  /* 配合collision_detection 使用；
+  ***设置local goal和id , path sample is 0.2m, offset = 0.5m,offset_index = 0.5 / 0.2;
+  */
+  void set_local_goal(const int collision_state_index, const double obs_x, const double obs_y, const int offset_index);
+  void update_local_goal();
  protected:
   double HZ;
   std::string ROBOT_FRAME;
@@ -128,16 +136,17 @@ class DWAPlanner {
   double DT;
   double GOAL_THRESHOLD;
   double TURN_DIRECTION_THRESHOLD;
-  double CAR_L;
-  double CAR_W;
+  double WHELL_AXLE_LENGTH;
+  double CAR_WIDTH;
+  double CAR_LENGTH;
+  double CAR_FRONT_2_AKMAN_LENGTH;
+  double CAR_BACK_2_AKMAN_LENGTH;
+  double EXPANSION_DISTANCE_WIDTH;
+  double EXPANSION_DISTANCE_LENGTH;
   double LIDAR_2_AKMAN_OFFSET_X;//lidar coord 2 akman coord
-  double CAR_FRONT_TRACK_DIS;
-  double DETECT_OBSTACLE_DIS_THR;
-  double CAR_TRACKED_CIRCUMSCRIBED_RADIUS;//外切半径
   std::atomic<int> risk;
   std::atomic<bool> cmd_updated;
   std::atomic<bool> enable_dwa_planner;
-  nav_msgs::Path local_path;
   ros::NodeHandle nh;
   ros::NodeHandle local_nh;
 
@@ -161,15 +170,18 @@ class DWAPlanner {
   geometry_msgs::PoseStamped local_goal;
   actuator::cmd cmd_vel;
   int local_goal_id = -1;
+  nav_msgs::Path local_path;
+  planner::planner origin_local_path;// just for update goal position
   perception_msgs::Perception laser_point_cloud;
   nav_msgs::OccupancyGrid local_map;
   double   current_omega;// arc/s
   double current_velocity;//m/s
   double current_gamma_arc; //arc
-  double min_turn_radius;
+  double MIN_TRUN_RADIUS;
   TrackedArea tracked_area;
   int  control_id = 1;
-  bool local_goal_subscribed;
+  bool local_goal_exist;
+  bool local_path_updated;
   bool laser_point_cloud_updated;
   bool actuator_updated;
   boost::thread *cmd_thread_;
