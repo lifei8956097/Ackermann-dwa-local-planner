@@ -30,7 +30,8 @@ DWAPlanner::DWAPlanner(void)
   local_nh.param("CAR_FRONT_2_AKMAN_LENGTH", CAR_FRONT_2_AKMAN_LENGTH, {2.0});
   local_nh.param("CAR_BACK_2_AKMAN_LENGTH", CAR_BACK_2_AKMAN_LENGTH, {0.7});
   local_nh.param("EXPANSION_DISTANCE_WIDTH", EXPANSION_DISTANCE_WIDTH, {0.1});
-  local_nh.param("EXPANSION_DISTANCE_LENGTH", EXPANSION_DISTANCE_LENGTH, {0.1});
+  local_nh.param("EXPANSION_FRONT_DISTANCE_LENGTH", EXPANSION_FRONT_DISTANCE_LENGTH, {1.0});
+  local_nh.param("EXPANSION_BACK_DISTANCE_LENGTH", EXPANSION_BACK_DISTANCE_LENGTH, {0.1});
   local_nh.param("LIDAR_2_AKMAN_OFFSET_X", LIDAR_2_AKMAN_OFFSET_X, {0.5});
   DT = 1.0 / HZ;
   MAX_OMEGA = MAX_GAMMA;
@@ -39,8 +40,8 @@ DWAPlanner::DWAPlanner(void)
   current_gamma_arc = 0;
   MIN_TRUN_RADIUS = WHELL_AXLE_LENGTH / std::tan(MAX_GAMMA);
   CAR_LENGTH = CAR_BACK_2_AKMAN_LENGTH + CAR_FRONT_2_AKMAN_LENGTH;
-  tracked_area = TrackedArea(0, 0, 0, -(CAR_BACK_2_AKMAN_LENGTH + EXPANSION_DISTANCE_LENGTH),
-                             CAR_FRONT_2_AKMAN_LENGTH + EXPANSION_DISTANCE_LENGTH,
+  tracked_area = TrackedArea(0, 0, 0, -(CAR_BACK_2_AKMAN_LENGTH + EXPANSION_BACK_DISTANCE_LENGTH),
+                             CAR_FRONT_2_AKMAN_LENGTH + EXPANSION_FRONT_DISTANCE_LENGTH,
                              -(CAR_WIDTH * 0.5 + EXPANSION_DISTANCE_WIDTH),
                              CAR_WIDTH * 0.5 + EXPANSION_DISTANCE_WIDTH);
   local_path.header.frame_id = "base_link";
@@ -76,7 +77,8 @@ DWAPlanner::DWAPlanner(void)
   ROS_INFO_STREAM("CAR_FRONT_2_AKMAN_LENGTH" << CAR_FRONT_2_AKMAN_LENGTH);
   ROS_INFO_STREAM("CAR_BACK_2_AKMAN_LENGTH" << CAR_BACK_2_AKMAN_LENGTH);
   ROS_INFO_STREAM("EXPANSION_DISTANCE_WIDTH" << EXPANSION_DISTANCE_WIDTH);
-  ROS_INFO_STREAM("EXPANSION_DISTANCE_LENGTH" << EXPANSION_DISTANCE_LENGTH);
+  ROS_INFO_STREAM("EXPANSION_FRONT_DISTANCE_LENGTH" << EXPANSION_FRONT_DISTANCE_LENGTH);
+  ROS_INFO_STREAM("EXPANSION_BACK_DISTANCE_LENGTH" << EXPANSION_BACK_DISTANCE_LENGTH);
   ROS_INFO_STREAM("LIDAR_2_AKMAN_OFFSET_X:" << LIDAR_2_AKMAN_OFFSET_X);
   akman_cmd_pub = nh.advertise<actuator::cmd>("/takeOver", 1);
   candidate_trajectories_pub = local_nh.advertise<visualization_msgs::MarkerArray>("candidate_trajectories", 1);
@@ -99,10 +101,6 @@ DWAPlanner::~DWAPlanner() {
   cmd_thread_->interrupt();
   cmd_thread_->join();
   delete cmd_thread_;
-
-//  if (pcl_orderd_cloud_ptr != nullptr) {
-//    delete pcl_orderd_cloud_ptr;
-//  }
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -196,13 +194,13 @@ void DWAPlanner::laser_point_cloud_callback(const perception_msgs::PerceptionCon
   pcl_orderd_cloud_ptr->points.clear();
   for (auto it : laser_point_cloud.info) {
     pcl::PointXYZ point;
-    point.x = it.x;
+    point.x = it.x + LIDAR_2_AKMAN_OFFSET_X;
     point.y = it.y;
     pcl_orderd_cloud_ptr->points.push_back(point);
   }
   // TODO(lifei) filter the point cloud, if needed
   voxel_filter.setInputCloud(pcl_orderd_cloud_ptr);
-  voxel_filter.setLeafSize(0.5f, 0.5f, 0.5f);
+  voxel_filter.setLeafSize(0.2f, 0.2f, 0.2f);
   voxel_filter.filter(*pcl_orderd_cloud_filter_ptr);
   // kdtree
   kdtree.setInputCloud(pcl_orderd_cloud_ptr);
@@ -233,7 +231,7 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(Window dynamic_window, E
   std::vector<State> best_traj;
   // TODO(lifei) 角速度空间添加特定的采样角。
   std::set<float> omega_space;
-  double arc_step = 0.01;
+  double arc_step = 0.002;
   for (float i = -0.04; i <= 0.04; i += arc_step) {
     if (i >= dynamic_window.min_omega && i <= dynamic_window.max_omega);
     omega_space.insert(i);
@@ -250,16 +248,15 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(Window dynamic_window, E
   for (float v = dynamic_window.min_velocity; v <= dynamic_window.max_velocity; v += VELOCITY_RESOLUTION) {
     for (std::set<float>::iterator omega_it = omega_space.begin(); omega_it != omega_space.end(); ++omega_it) {
       double yaw_filter = 1.05;
-      if ( v == 1) yaw_filter = 1.57;
 
       State state(0.0, 0.0, 0.0, current_velocity, current_omega);
       std::vector<State> traj;
       for (float t = 0; t <= PREDICT_TIME; t += DT) {
         motion(state, v, *omega_it);
-        // yaw > 45 or，distance > MAX_DIST,stop generating traj，
+        // stop generating traj，
         if (state.x != 0 && state.y != 0) {
           if ((fabs(state.yaw) > yaw_filter) ||
-              std::sqrt(state.x * state.x + state.y * state.y) > 3 * MIN_TRUN_RADIUS) {
+              std::sqrt(state.x * state.x + state.y * state.y) > MAX_DIST) {
             traj.push_back(state);
             break;
           }
@@ -271,15 +268,15 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(Window dynamic_window, E
           double dx = traj.back().x - state.x;
           double dy = traj.back().y - state.y;
           double angel_threshold = 0.1;
-          if (state.x < 0.7) angel_threshold = 0.04;
+          if (state.x < CAR_BACK_2_AKMAN_LENGTH + EXPANSION_BACK_DISTANCE_LENGTH) angel_threshold = 0.02;
           if (fabs(traj.back().yaw - state.yaw) >= angel_threshold ||
-              std::sqrt(dx * dx + dy * dy) > CAR_LENGTH * 0.5) //CAR_TRACKED_CIRCUMSCRIBED_RADIUS
+              std::sqrt(dx * dx + dy * dy) >= CAR_LENGTH * 0.5) //CAR_TRACKED_CIRCUMSCRIBED_RADIUS
             traj.push_back(state);
         }
       }
       // abandon the too short trajectory
-      if ( (fabs(*omega_it) <= 0.04 && traj.back().x < CAR_FRONT_2_AKMAN_LENGTH + 0.8 + 0.2) ||
-           traj.back().x < 0.2) continue;
+//      if ((fabs(*omega_it) < 0.02 && traj.back().x < 6 /*2 * tracked_area.max_x*/ ) ||
+//          traj.back().x <= 0.4) continue;
       trajectories.push_back(traj);
 
       float to_goal_cost = calc_to_goal_cost(traj, goal);
@@ -307,7 +304,7 @@ std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(Window dynamic_window, E
   candidate_trajectories = trajectories;
   if (min_cost == 1e6) {
     std::vector<State> traj;
-    State state(0.0, 0.0, 0.0, 0, 0);
+    State state(0.0, 0.0, 0, 0, 0);
     traj.push_back(state);
     best_traj = traj;
     ROS_WARN_THROTTLE(1.0, "candidate_trajectories has no best way tracked");
@@ -536,45 +533,38 @@ float DWAPlanner::calc_obstacle_cost(const std::vector<State> &traj, const std::
   float cost = 0.0;
   float min_dist = 1e3;
   for (const auto &state : traj) {
+    TrackedArea path_tracked_area(state.x, state.y, state.yaw,
+                                  tracked_area.min_x, tracked_area.max_x,
+                                  tracked_area.min_y + 0.05, tracked_area.max_y + 0.05) ; // 粗检测，各加5cm
+    TrackedArea small_tracked_area(0, 0, 0,
+                                   tracked_area.min_x, tracked_area.max_x,
+                                   -(CAR_WIDTH * 0.5 + EXPANSION_DISTANCE_WIDTH),
+                                   CAR_WIDTH * 0.5 + EXPANSION_DISTANCE_WIDTH);
     for (const auto &obs : obs_list) {
       float dist = sqrt((state.x - obs[0]) * (state.x - obs[0]) +
                         (state.y - obs[1]) * (state.y - obs[1]));
-      //distance between obstacle and state of traj,if < 2m check it carefully
-      if (dist < CAR_FRONT_2_AKMAN_LENGTH + 0.8) {
-        TrackedArea path_tracked_area(state.x, state.y, state.yaw,
-                                      tracked_area.min_x, tracked_area.max_x,
-                                      tracked_area.min_y, tracked_area.max_y) ;
+      //distance between obstacle and state of traj,if 車前一米爲trapped
+      if (dist <= tracked_area.max_x) {
         if (path_tracked_area.IsPtInArea(obs[0], obs[1])) {
           double distance_origin = sqrt(state.x * state.x + state.y * state.y);
-          cost = 1e3;
-          // 在车转弯区域碰撞,返回无穷大
-          if (distance_origin < 2 * MIN_TRUN_RADIUS && distance_origin > tracked_area.max_x
-              /*CAR_FRONT_2_AKMAN_LENGTH + WHELL_AXLE_LENGTH*/) {
-            cost = 1e6;
-            return cost;
-          } else {
-            TrackedArea small_tracked_area(state.x, state.y, state.yaw,
-                                           -(CAR_BACK_2_AKMAN_LENGTH + EXPANSION_DISTANCE_LENGTH),
-                                           CAR_FRONT_2_AKMAN_LENGTH + EXPANSION_DISTANCE_LENGTH,
-                                           -(CAR_WIDTH * 0.5 + EXPANSION_DISTANCE_WIDTH * 0.5),
-                                           CAR_WIDTH * 0.5 + EXPANSION_DISTANCE_WIDTH * 0.5);
+          cost = 1e6;
+          // 在车当前位置碰撞，启动精细检测
+          if (tracked_area.IsPtInArea(obs[0], obs[1])) {
             if (small_tracked_area.IsPtInArea(obs[0], obs[1])) {
               cost = 1e6;
               return cost;
+            } else {
+              cost = 1e3;
             }
           }
-
+          return cost;
         }
       }
       min_dist = std::min(min_dist, dist);
     }
   }
-  // 由于雷达给的点云会飘动，导致选择的极限路径存在碰和不碰两个跳动状态。
-  if (min_dist <= tracked_area.max_y + 0.05) {
-    cost = 1e2;
-  } else {
-    cost = 1.0 / min_dist;
-  }
+
+  cost = 1.0 / min_dist;
   return cost;
 }
 //abandoned function
@@ -616,11 +606,11 @@ void DWAPlanner::motion(State &state, const double velocity, const double omega)
 std::vector<std::vector<float>> DWAPlanner::laser_point_cloud_to_obs() {
   std::set<std::vector<float>> obs_list;
   std::vector<std::vector<float>> ret_obs_list;
-  for (auto it : laser_point_cloud.info) {
-    if (it.x + LIDAR_2_AKMAN_OFFSET_X > 3 * MIN_TRUN_RADIUS ||
-        it.x + LIDAR_2_AKMAN_OFFSET_X < -(CAR_BACK_2_AKMAN_LENGTH + EXPANSION_DISTANCE_LENGTH) ||
+  for (auto it : pcl_orderd_cloud_filter_ptr->points) {
+    if (it.x > MAX_DIST ||
+        it.x < -(CAR_BACK_2_AKMAN_LENGTH + EXPANSION_BACK_DISTANCE_LENGTH) ||
         fabs(it.y) > 3 * CAR_WIDTH) continue;
-    std::vector<float> obs_state = {(float)(it.x + LIDAR_2_AKMAN_OFFSET_X), float(it.y)};
+    std::vector<float> obs_state = {(float)(it.x), float(it.y)};
     obs_list.insert(obs_state);
   }
   ret_obs_list.assign(obs_list.begin(), obs_list.end());
@@ -629,10 +619,9 @@ std::vector<std::vector<float>> DWAPlanner::laser_point_cloud_to_obs() {
 
 std::set<std::vector<float> > DWAPlanner::laser_point_cloud_to_obs_with_filter() {
   std::set<std::vector<float>> obs_list;
-  for (auto it : laser_point_cloud.info) {
-    if (it.x < -(CAR_BACK_2_AKMAN_LENGTH + EXPANSION_DISTANCE_LENGTH)) continue; //防止尾部碰撞,后轴到车尾的距离
-//    if (it.x == it.y && it.z == it.x && it.z == 0) continue;
-    std::vector<float> obs_state = {(float)(it.x + LIDAR_2_AKMAN_OFFSET_X), float(it.y)};
+  for (auto it : pcl_orderd_cloud_filter_ptr->points) {
+    if (it.x < -(CAR_BACK_2_AKMAN_LENGTH + EXPANSION_BACK_DISTANCE_LENGTH) || it.x > MAX_DIST) continue; //防止尾部碰撞,后轴到车尾的距离
+    std::vector<float> obs_state = {(float)(it.x), float(it.y)};
     obs_list.insert(obs_state);
   }
   return obs_list;
@@ -669,7 +658,6 @@ void DWAPlanner::cmdThread() {
       visualize_trajectories(candidate_trajectories, 0, 1, 0, 1000, candidate_trajectories_pub);
       visualize_car_mode(tracked_area, 1, 0, 0, car_traked_area_pub);
     }
-//   ROS_INFO_STREAM( "cmd_vel: (" << cmd_vel.speed / DWA_PLANNER_VELOCITY_FACTOR << "[m/s], " << cmd_vel.steer << "[degree])");
     akman_cmd_pub.publish(temp_cmd);
     ros::spinOnce();
     loop_rate.sleep();
@@ -679,6 +667,7 @@ void DWAPlanner::cmdThread() {
 void DWAPlanner::visualize_trajectories(const std::vector<std::vector<State>> &trajectories,
                                         const double r, const double g, const double b,
                                         const int trajectories_size, const ros::Publisher &pub) {
+  if (pub.getNumSubscribers() <= 0) return;
   visualization_msgs::MarkerArray v_trajectories;
   int count = 0;
   const int size = trajectories.size();
@@ -726,6 +715,7 @@ void DWAPlanner::visualize_trajectories(const std::vector<std::vector<State>> &t
 void DWAPlanner::visualize_trajectory(const std::vector<State> &trajectory,
                                       const double r, const double g, const double b,
                                       const ros::Publisher &pub) {
+  if (pub.getNumSubscribers() <= 0) return;
   visualization_msgs::Marker v_trajectory;
   v_trajectory.header.frame_id = ROBOT_FRAME;
   v_trajectory.header.stamp = ros::Time::now();
@@ -754,6 +744,7 @@ void DWAPlanner::visualize_trajectory(const std::vector<State> &trajectory,
 void DWAPlanner::visualize_local_goal(const geometry_msgs::PoseStamped local_goal,
                                       const double r, const double g, const double b,
                                       const ros::Publisher &pub) {
+  if (pub.getNumSubscribers() <= 0) return;
   visualization_msgs::Marker v_local_goal;
   v_local_goal.header.frame_id = ROBOT_FRAME;
   v_local_goal.header.stamp = ros::Time::now();
@@ -780,6 +771,7 @@ void DWAPlanner::visualize_local_goal(const geometry_msgs::PoseStamped local_goa
 void DWAPlanner::visualize_car_mode(const DWAPlanner::TrackedArea &car_tracked_area,
                                     const double r, const double g, const double b,
                                     const ros::Publisher &pub) {
+  if (pub.getNumSubscribers() <= 0) return;
   visualization_msgs::Marker v_trajectory;
   v_trajectory.header.frame_id = ROBOT_FRAME;
   v_trajectory.header.stamp = ros::Time::now();
@@ -826,6 +818,7 @@ void DWAPlanner::visualize_car_mode(const DWAPlanner::TrackedArea &car_tracked_a
 void DWAPlanner::visualize_collision_points_warning(const std::set<std::vector<float> > &collision_points,
                                                     const double r, const double g, const double b,
                                                     const ros::Publisher &pub) {
+  if (pub.getNumSubscribers() <= 0) return;
   visualization_msgs::Marker v_collision_points;
   v_collision_points.header.frame_id = ROBOT_FRAME;
   v_collision_points.header.stamp = ros::Time::now();

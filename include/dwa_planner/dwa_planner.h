@@ -144,7 +144,8 @@ class DWAPlanner {
   double CAR_FRONT_2_AKMAN_LENGTH;
   double CAR_BACK_2_AKMAN_LENGTH;
   double EXPANSION_DISTANCE_WIDTH;
-  double EXPANSION_DISTANCE_LENGTH;
+  double EXPANSION_FRONT_DISTANCE_LENGTH;
+  double EXPANSION_BACK_DISTANCE_LENGTH;
   double LIDAR_2_AKMAN_OFFSET_X;//lidar coord 2 akman coord
   std::atomic<int> risk;
   std::atomic<bool> cmd_updated;
