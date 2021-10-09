@@ -5,6 +5,7 @@
 #include <geometry_msgs/Twist.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <sensor_msgs/LaserScan.h>
+#include <sensor_msgs/PointCloud2.h>
 #include <nav_msgs/Odometry.h>
 #include <nav_msgs/OccupancyGrid.h>
 #include <nav_msgs/Path.h>
@@ -24,6 +25,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl_conversions/pcl_conversions.h>
 
 class DWAPlanner {
  public:
@@ -89,6 +91,7 @@ class DWAPlanner {
   void local_path_callback(const planner::plannerConstPtr &);
   void laser_point_cloud_callback(const perception_msgs::PerceptionConstPtr &);
   void actuator_callback(const actuator::actuatorConstPtr &);
+  void local_map_callback(const sensor_msgs::PointCloud2ConstPtr &);
   Window calc_dynamic_window(const double);
   float calc_to_goal_cost(const std::vector<State> &traj, const Eigen::Vector3d &goal);
   float calc_speed_cost(const std::vector<State> &traj, const float target_velocity);
@@ -188,10 +191,12 @@ class DWAPlanner {
   bool local_path_updated;
   bool laser_point_cloud_updated;
   bool actuator_updated;
+  bool data_error;
   boost::thread *cmd_thread_;
   boost::recursive_mutex cmd_mutex_;
   boost::recursive_mutex wake_up_mutex_;
   boost::condition_variable_any cmd_cond_;
+  pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_local_map_cloud_ptr;
   pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_orderd_cloud_ptr;
   pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_orderd_cloud_filter_ptr; // 0.5m lvbo
   pcl::KdTreeFLANN<pcl::PointXYZ>kdtree;

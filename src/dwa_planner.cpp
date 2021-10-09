@@ -3,7 +3,7 @@
 #define DWA_PLANNER_VELOCITY_FACTOR 50
 DWAPlanner::DWAPlanner(void)
   : local_nh("~"), local_goal_exist(false), pcl_orderd_cloud_ptr(nullptr), local_path_updated(false),
-    laser_point_cloud_updated(false), actuator_updated(false), enable_dwa_planner(false) {
+    laser_point_cloud_updated(false), actuator_updated(false), enable_dwa_planner(false), data_error(false) {
   local_nh.param("HZ", HZ, {20});
   local_nh.param("ROBOT_FRAME", ROBOT_FRAME, {"base_link"});
   local_nh.param("TARGET_VELOCITY", TARGET_VELOCITY, {0.8});
@@ -47,9 +47,10 @@ DWAPlanner::DWAPlanner(void)
   local_path.header.frame_id = "base_link";
   pcl::PointCloud<pcl::PointXYZ>::Ptr p(new pcl::PointCloud<pcl::PointXYZ>);
   pcl::PointCloud<pcl::PointXYZ>::Ptr p_filter(new pcl::PointCloud<pcl::PointXYZ>);
+  pcl::PointCloud<pcl::PointXYZ>::Ptr p_local_map(new pcl::PointCloud<pcl::PointXYZ>);
   pcl_orderd_cloud_filter_ptr = p_filter;
   pcl_orderd_cloud_ptr = p;
-
+  pcl_local_map_cloud_ptr = p_local_map;
   ROS_INFO("=== DWA Planner ===");
   ROS_INFO_STREAM("HZ: " << HZ);
   ROS_INFO_STREAM("DT: " << DT);
@@ -91,6 +92,7 @@ DWAPlanner::DWAPlanner(void)
   local_path_sub = nh.subscribe("/planner", 1, &DWAPlanner::local_path_callback, this);
   laser_point_cloud_sub = nh.subscribe("/perception_info", 1, &DWAPlanner::laser_point_cloud_callback, this);
   actuator_sub = nh.subscribe("/actuator", 1, &DWAPlanner::actuator_callback, this);
+  local_map_sub = nh.subscribe("/virtual_local_map", 1, &DWAPlanner::local_map_callback, this);
 //set up the planner's thread
   cmd_thread_ = new boost::thread(boost::bind(&DWAPlanner::cmdThread, this));
 }
@@ -185,6 +187,14 @@ void DWAPlanner::local_path_callback(const planner::plannerConstPtr &msg) {
 }
 
 void DWAPlanner::laser_point_cloud_callback(const perception_msgs::PerceptionConstPtr &msg) {
+  // laser data error
+  if (msg->status == 1) {
+    data_error = true;
+    laser_point_cloud_updated = false;
+    cmd_cond_.notify_one();
+    ROS_WARN_STREAM("Laser point cloud has error");
+    return;
+  }
   laser_point_cloud = *msg;
   // sort
   std::sort(laser_point_cloud.info.begin(), laser_point_cloud.info.end(),
@@ -218,6 +228,12 @@ void DWAPlanner::actuator_callback(const actuator::actuatorConstPtr &msg) {
     current_omega = current_velocity * std::tan(current_gamma_arc ) / WHELL_AXLE_LENGTH;
     actuator_updated = true;
   }
+}
+
+void DWAPlanner::local_map_callback(const sensor_msgs::PointCloud2ConstPtr &msg) {
+  pcl_local_map_cloud_ptr->points.clear();
+  pcl::fromROSMsg(*msg, *pcl_local_map_cloud_ptr);
+  ROS_INFO_STREAM("local map subscribed: " << pcl_local_map_cloud_ptr->points.size());
 }
 
 std::vector<DWAPlanner::State> DWAPlanner::dwa_planning(Window dynamic_window, Eigen::Vector3d goal,
@@ -613,6 +629,13 @@ std::vector<std::vector<float>> DWAPlanner::laser_point_cloud_to_obs() {
     std::vector<float> obs_state = {(float)(it.x), float(it.y)};
     obs_list.insert(obs_state);
   }
+  for (auto it : pcl_local_map_cloud_ptr->points) {
+    if (it.x > MAX_DIST ||
+        it.x < -(CAR_BACK_2_AKMAN_LENGTH + EXPANSION_BACK_DISTANCE_LENGTH) ||
+        fabs(it.y) > 3 * CAR_WIDTH) continue;
+    std::vector<float> obs_state = {(float)(it.x), float(it.y)};
+    obs_list.insert(obs_state);
+  }
   ret_obs_list.assign(obs_list.begin(), obs_list.end());
   return ret_obs_list;
 }
@@ -620,6 +643,11 @@ std::vector<std::vector<float>> DWAPlanner::laser_point_cloud_to_obs() {
 std::set<std::vector<float> > DWAPlanner::laser_point_cloud_to_obs_with_filter() {
   std::set<std::vector<float>> obs_list;
   for (auto it : pcl_orderd_cloud_filter_ptr->points) {
+    if (it.x < -(CAR_BACK_2_AKMAN_LENGTH + EXPANSION_BACK_DISTANCE_LENGTH) || it.x > MAX_DIST) continue; //防止尾部碰撞,后轴到车尾的距离
+    std::vector<float> obs_state = {(float)(it.x), float(it.y)};
+    obs_list.insert(obs_state);
+  }
+  for (auto it : pcl_local_map_cloud_ptr->points) {
     if (it.x < -(CAR_BACK_2_AKMAN_LENGTH + EXPANSION_BACK_DISTANCE_LENGTH) || it.x > MAX_DIST) continue; //防止尾部碰撞,后轴到车尾的距离
     std::vector<float> obs_state = {(float)(it.x), float(it.y)};
     obs_list.insert(obs_state);
@@ -644,11 +672,16 @@ void DWAPlanner::cmdThread() {
         temp_cmd = cmd_vel;
         lock.unlock();
         cmd_updated = false;
+        if (data_error) {
+          temp_cmd.speed = 0;
+          temp_cmd.steer = 0;
+          temp_cmd.enable = true;
+          temp_cmd.id = control_id;
+        }
         akman_cmd_pub.publish(temp_cmd);
       }
       cmd_cond_.wait(lock);
     }
-
     if (cmd_updated) {
       boost::unique_lock<boost::recursive_mutex> lock(cmd_mutex_);
       temp_cmd = cmd_vel;
@@ -657,6 +690,12 @@ void DWAPlanner::cmdThread() {
       visualize_local_goal(local_goal, 1, 1, 0, local_goal_pub);
       visualize_trajectories(candidate_trajectories, 0, 1, 0, 1000, candidate_trajectories_pub);
       visualize_car_mode(tracked_area, 1, 0, 0, car_traked_area_pub);
+    }
+    if (data_error) {
+      temp_cmd.speed = 0;
+      temp_cmd.steer = 0;
+      temp_cmd.enable = true;
+      temp_cmd.id = control_id;
     }
     akman_cmd_pub.publish(temp_cmd);
     ros::spinOnce();
